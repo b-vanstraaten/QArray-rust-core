@@ -61,6 +61,10 @@ fn analytical_solution(c_gd: ArrayView<f64, Ix2>, v_g: ArrayView<f64, Ix1>) -> A
     return c_gd.dot(&v_g);
 }
 
+// OSQP's "infinity" for double-precision builds (osqp_api_constants.h: OSQP_INFTY = 1e30).
+// The osqp crate does not re-export it, so define it here.
+const OSQP_INFTY: f64 = 1e30;
+
 #[allow(non_snake_case)]
 fn init_osqp_problem_open<'a>(
     v_g: ArrayView<f64, Ix1>,
@@ -77,7 +81,9 @@ fn init_osqp_problem_open<'a>(
     let l_array = Array1::<f64>::zeros(dim);
     let l = l_array.as_slice().expect("failed to get slice of l");
 
-    let u_array = Array1::<f64>::from_elem(dim, f64::MAX);
+    // OSQP treats any bound >= OSQP_INFTY as +infinity; f64::MAX overflows the solver's
+    // internal scaling and makes it fail (returning no solution), so use OSQP_INFTY.
+    let u_array = Array1::<f64>::from_elem(dim, OSQP_INFTY);
     let u = u_array.as_slice().expect("failed to get slice of u");
     let A = {
         let identity = Array2::<f64>::eye(dim);
@@ -106,3 +112,31 @@ fn compute_argmin_open(
         true => soft_argmin(n_list, c_dd_inv, vg_dash, T),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ground_state_open_1d;
+    use ndarray::array;
+
+    // Regression: this 3-dot open-dot problem used to panic ("failed to solve problem")
+    // because the OSQP constraint upper bound was f64::MAX, which the solver cannot
+    // handle. With OSQP_INFTY (1e30) the QP solves and the ground state is returned.
+    #[test]
+    fn open_dot_qp_handles_infinite_upper_bound() {
+        let c_dd_inv = array![
+            [0.317, 0.009, 0.003],
+            [0.009, 0.281, 0.009],
+            [0.003, 0.009, 0.317],
+        ];
+        let c_gd = array![
+            [-0.5, 0.0, 0.0],
+            [0.0, -0.16667, 0.0],
+            [0.0, 0.0, -0.05556],
+        ];
+        let v_g = array![[1.0, 1.0, 1.0]];
+        let n = ground_state_open_1d(v_g.view(), c_gd.view(), c_dd_inv.view(), 1.0, false, 50.0);
+        assert!(n.iter().all(|x| x.is_finite() && *x >= 0.0));
+    }
+}
+
+
